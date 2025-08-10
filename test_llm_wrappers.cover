@@ -1,0 +1,50 @@
+    1: import os
+    1: import sys
+    1: import unittest
+    1: import asyncio
+       
+       # Ensure src is importable when running tests from repo root
+    1: THIS_DIR = os.path.dirname(__file__)
+    1: SRC_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", "src"))
+    1: if SRC_DIR not in sys.path:
+>>>>>>     sys.path.insert(0, SRC_DIR)
+       
+    1: from llm.wrappers import LocalLLM, LocalLLMConfig  # noqa: E402
+       
+       
+    2: class LocalLLMTests(unittest.IsolatedAsyncioTestCase):
+    1:     async def test_generate_async_deterministic(self):
+    1:         cfg = LocalLLMConfig(tokens_per_second=0.0, ttfb_ms=0)
+    1:         llm = LocalLLM(cfg)
+    1:         text = await llm.generate_async("Hello", max_tokens=5)
+    1:         self.assertEqual(text, "token_0 token_1 token_2 token_3 token_4")
+       
+    1:     async def test_stream_async_tokens_and_order(self):
+    1:         cfg = LocalLLMConfig(tokens_per_second=0.0, ttfb_ms=0)
+    1:         llm = LocalLLM(cfg)
+    1:         tokens = []
+    5:         async for tok in llm.stream_async("Prompt", max_tokens=4):
+    4:             tokens.append(tok)
+    1:         self.assertEqual(tokens, ["token_0", "token_1", "token_2", "token_3"])
+       
+    1:     async def test_concurrency_cap(self):
+               # Use small TTFB and small per-token delay to ensure overlap
+    1:         cfg = LocalLLMConfig(tokens_per_second=500.0, ttfb_ms=2, max_concurrency=5)
+    1:         llm = LocalLLM(cfg)
+       
+    1:         async def worker(i: int):
+                   # Make each request produce a handful of tokens
+   10:             return await llm.generate_async(f"P{i}", max_tokens=3)
+       
+               # Launch more tasks than the concurrency cap
+   11:         tasks = [asyncio.create_task(worker(i)) for i in range(10)]
+    1:         await asyncio.gather(*tasks)
+       
+               # Peak concurrency should be capped at 5
+    1:         self.assertEqual(llm.peak_concurrency, 5)
+               # Basic sanity: outputs are deterministic
+   22:         self.assertTrue(all(t == "token_0 token_1 token_2" for t in [task.result() for task in tasks]))
+       
+       
+    1: if __name__ == "__main__":
+>>>>>>     unittest.main(verbosity=2)

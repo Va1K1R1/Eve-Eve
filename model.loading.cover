@@ -1,0 +1,217 @@
+    1: """
+       VRAM-aware Model Loading Shim (interface only) — Kanban T-003.
+       
+       This module defines a small, stdlib-only interface for model loading that is
+       aware of VRAM budgets. It does not import any heavy ML frameworks and is
+       designed for deterministic, offline unit tests.
+       
+       Key ideas:
+       - Model overhead (GiB) + per-sample memory (GiB) * batch_size must fit into
+         the effective VRAM budget after applying a safety margin.
+       - Suggest a batch size based on the current VRAM cap and simple memory model.
+       
+       Privacy-by-design: no network calls.
+       """
+    1: from __future__ import annotations
+       
+    1: import logging
+    1: from abc import ABC, abstractmethod
+    1: from dataclasses import dataclass
+    1: from math import floor
+    1: from typing import Any, Dict, Optional
+       
+    1: logger = logging.getLogger(__name__)
+       
+       
+    3: @dataclass(frozen=True)
+    2: class VRAMBudget:
+    1:     """Represents a VRAM cap in GiB and a safety margin [0.0, 1.0).
+       
+           The effective budget used for allocations equals vram_cap_gb * (1 - safety_margin).
+           """
+       
+    1:     vram_cap_gb: float
+    1:     safety_margin: float = 0.10
+       
+    1:     def effective_gb(self) -> float:
+   16:         if self.vram_cap_gb <= 0:
+    2:             raise ValueError("vram_cap_gb must be > 0")
+   14:         if not (0.0 <= self.safety_margin < 1.0):
+    3:             raise ValueError("safety_margin must be in [0.0, 1.0)")
+   11:         return self.vram_cap_gb * (1.0 - self.safety_margin)
+       
+       
+    2: class ModelAdapter(ABC):
+    1:     """Abstract VRAM-aware model adapter.
+       
+           Concrete implementations should avoid heavy imports in module scope.
+           """
+       
+    2:     @property
+    2:     @abstractmethod
+    2:     def loaded(self) -> bool:
+               """Whether the underlying model is loaded."""
+       
+    2:     @abstractmethod
+    2:     def estimate_sample_mem_gb(self, input_spec: Optional[Dict[str, Any]] = None) -> float:
+               """Estimate memory per sample (GiB) based on an optional input spec.
+       
+               Implementations may ignore input_spec and return a fixed value.
+               """
+       
+    2:     @abstractmethod
+    2:     def model_overhead_gb(self) -> float:
+               """Return the base model memory overhead (GiB) when loaded."""
+       
+    5:     def suggest_batch_size(
+               self,
+    1:         vram_cap_gb: float,
+    2:         safety_margin: float = 0.10,
+    2:         input_spec: Optional[Dict[str, Any]] = None,
+    1:     ) -> int:
+               """Suggest the largest batch size that fits in the given budget.
+       
+               Returns 0 if even one sample cannot fit after overhead.
+               Raises ValueError for non-positive caps or invalid safety_margin.
+               """
+    6:         budget = VRAMBudget(vram_cap_gb, safety_margin)
+    6:         eff = budget.effective_gb()
+    4:         overhead = self.model_overhead_gb()
+    4:         per_sample = self.estimate_sample_mem_gb(input_spec)
+    4:         if per_sample <= 0 or overhead < 0:
+>>>>>>             raise ValueError("per-sample must be > 0 and overhead >= 0")
+    4:         usable = eff - overhead
+    4:         if usable < per_sample:
+    4:             logger.debug(
+    2:                 "Batch suggest: unusable budget (eff=%.3f, overhead=%.3f, per=%.3f)",
+    2:                 eff,
+    2:                 overhead,
+    2:                 per_sample,
+                   )
+    2:             return 0
+    2:         size = int(floor(usable / per_sample))
+    4:         logger.debug(
+    2:             "Batch suggest: eff=%.3f, overhead=%.3f, per=%.3f => batch=%d",
+    2:             eff,
+    2:             overhead,
+    2:             per_sample,
+    2:             size,
+               )
+    2:         return max(size, 0)
+       
+    6:     def can_fit_batch(
+               self,
+    1:         batch_size: int,
+    1:         vram_cap_gb: float,
+    2:         safety_margin: float = 0.10,
+    2:         input_spec: Optional[Dict[str, Any]] = None,
+    1:     ) -> bool:
+    4:         if batch_size < 0:
+>>>>>>             return False
+    4:         budget = VRAMBudget(vram_cap_gb, safety_margin)
+    4:         eff = budget.effective_gb()
+    4:         required = self.model_overhead_gb() + self.estimate_sample_mem_gb(input_spec) * batch_size
+    4:         fits = required <= eff
+    8:         logger.debug(
+    4:             "can_fit: required=%.3f, eff=%.3f, batch=%d -> %s",
+    4:             required,
+    4:             eff,
+    4:             batch_size,
+    4:             fits,
+               )
+    4:         return fits
+       
+    7:     def load(
+               self,
+    1:         model_path: str,
+    1:         vram_cap_gb: float,
+    2:         batch_size: Optional[int] = None,
+    2:         safety_margin: float = 0.10,
+    2:         input_spec: Optional[Dict[str, Any]] = None,
+    1:     ) -> Dict[str, Any]:
+               """Validate budget and mark model as loaded.
+       
+               In this interface-only shim, loading does not allocate real GPU memory.
+               Returns metadata including chosen batch_size.
+               Raises ValueError/MemoryError on invalid caps or oversubscription.
+               """
+    5:         if not model_path:
+    1:             raise ValueError("model_path must be non-empty")
+    4:         if batch_size is not None and batch_size < 0:
+    1:             raise ValueError("batch_size cannot be negative")
+    3:         chosen = batch_size if batch_size is not None else self.suggest_batch_size(vram_cap_gb, safety_margin, input_spec)
+    3:         if chosen == 0:
+                   # Allow zero-batch "initialize only" if overhead fits, else fail
+    2:             overhead_fits = VRAMBudget(vram_cap_gb, safety_margin).effective_gb() >= self.model_overhead_gb()
+    2:             if not overhead_fits:
+    1:                 raise MemoryError("Model overhead does not fit within VRAM budget")
+    2:         if not self.can_fit_batch(chosen, vram_cap_gb, safety_margin, input_spec):
+>>>>>>             raise MemoryError("Requested batch_size does not fit in VRAM budget")
+    2:         self._do_mark_loaded(model_path, chosen, vram_cap_gb, safety_margin)
+    2:         logger.info("Model loaded: path=%s, batch=%d, cap_gb=%.2f, margin=%.2f", model_path, chosen, vram_cap_gb, safety_margin)
+    2:         return {
+    2:             "model_path": model_path,
+    2:             "batch_size": chosen,
+    2:             "vram_cap_gb": vram_cap_gb,
+    2:             "safety_margin": safety_margin,
+               }
+       
+    2:     @abstractmethod
+    2:     def _do_mark_loaded(self, model_path: str, batch_size: int, vram_cap_gb: float, safety_margin: float) -> None:
+               """Concrete adapters should mark themselves as loaded and store state."""
+       
+    2:     @abstractmethod
+    2:     def unload(self) -> None:
+               """Unload model and free resources (no-op in dummy)."""
+       
+       
+    2: class DummyModelAdapter(ModelAdapter):
+    1:     """A small in-memory adapter with fixed memory characteristics.
+       
+           Useful for unit tests and for consumers to integrate the interface without
+           bringing any heavy runtime.
+           """
+       
+    1:     def __init__(self, model_overhead_gb: float = 1.0, per_sample_gb: float = 0.5, name: str = "dummy") -> None:
+    5:         if model_overhead_gb < 0:
+>>>>>>             raise ValueError("model_overhead_gb must be >= 0")
+    5:         if per_sample_gb <= 0:
+>>>>>>             raise ValueError("per_sample_gb must be > 0")
+    5:         self._overhead = float(model_overhead_gb)
+    5:         self._per = float(per_sample_gb)
+    5:         self._name = name
+    5:         self._loaded = False
+    5:         self._state: Dict[str, Any] = {}
+       
+    2:     @property
+    2:     def loaded(self) -> bool:  # type: ignore[override]
+    4:         return self._loaded
+       
+    1:     def estimate_sample_mem_gb(self, input_spec: Optional[Dict[str, Any]] = None) -> float:  # type: ignore[override]
+    8:         return self._per
+       
+    1:     def model_overhead_gb(self) -> float:  # type: ignore[override]
+   10:         return self._overhead
+       
+    1:     def _do_mark_loaded(self, model_path: str, batch_size: int, vram_cap_gb: float, safety_margin: float) -> None:  # type: ignore[override]
+    2:         self._loaded = True
+    2:         self._state = {
+    2:             "model_path": model_path,
+    2:             "batch_size": batch_size,
+    2:             "vram_cap_gb": vram_cap_gb,
+    2:             "safety_margin": safety_margin,
+    2:             "name": self._name,
+               }
+       
+    1:     def unload(self) -> None:  # type: ignore[override]
+    2:         if self._loaded:
+    2:             logger.info("Model unloaded: %s", self._state.get("model_path", "?"))
+    2:         self._loaded = False
+    2:         self._state.clear()
+       
+       
+    1: __all__ = [
+           "VRAMBudget",
+           "ModelAdapter",
+           "DummyModelAdapter",
+       ]

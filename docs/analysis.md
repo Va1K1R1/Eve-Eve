@@ -1,0 +1,166 @@
+# Project Analysis
+
+Generated: 2025-08-10T21:20:08Z
+Python: 3.13.2
+Platform: Windows-10-10.0.19045-SP0
+
+## Source Packages (9)
+- audio: files=4, classes=7, functions=8
+  - CLI: python -m audio.cli_asr
+  - CLI: python -m audio.cli_tts
+- llm: files=1, classes=3, functions=0
+- model: files=1, classes=3, functions=0
+- orchestrator: files=2, classes=3, functions=5
+  - CLI: python -m orchestrator.cli_orch
+- project: files=2, classes=0, functions=9
+  - CLI: python -m project.cli_analyze
+- security: files=2, classes=2, functions=9
+  - CLI: python -m security.cli_crypto
+- system: files=4, classes=6, functions=14
+  - CLI: python -m system.cli_capabilities
+  - CLI: python -m system.cli_gpu
+- vision: files=2, classes=3, functions=8
+  - CLI: python -m vision.cli_ocr
+- web: files=2, classes=6, functions=4
+  - CLI: python -m web.cli_web
+
+## CLI Modules (9)
+- python -m audio.cli_asr
+- python -m audio.cli_tts
+- python -m orchestrator.cli_orch
+- python -m project.cli_analyze
+- python -m security.cli_crypto
+- python -m system.cli_capabilities
+- python -m system.cli_gpu
+- python -m vision.cli_ocr
+- python -m web.cli_web
+
+## Tests (11)
+- tests.test_analyzer
+- tests.test_asr
+- tests.test_capabilities
+- tests.test_gpu_monitor
+- tests.test_llm_wrappers
+- tests.test_model_loading
+- tests.test_ocr
+- tests.test_orchestrator
+- tests.test_security
+- tests.test_tts
+- tests.test_web_automation
+
+## Coverage Artifacts (.cover) (115)
+- __future__
+- _colorize
+- _compression
+- _distutils_hack.__init__
+- _weakrefset
+- argparse
+- ast
+- asyncio.__init__
+- asyncio.base_events
+- asyncio.base_futures
+- asyncio.base_subprocess
+- asyncio.base_tasks
+- asyncio.constants
+- asyncio.coroutines
+- asyncio.events
+- asyncio.exceptions
+- asyncio.format_helpers
+- asyncio.futures
+- asyncio.locks
+- asyncio.log
+- asyncio.mixins
+- asyncio.proactor_events
+- asyncio.protocols
+- asyncio.queues
+- asyncio.runners
+- asyncio.selector_events
+- asyncio.sslproto
+- asyncio.staggered
+- asyncio.streams
+- asyncio.subprocess
+- asyncio.taskgroups
+- asyncio.tasks
+- asyncio.threads
+- asyncio.timeouts
+- asyncio.transports
+- asyncio.trsock
+- asyncio.windows_events
+- asyncio.windows_utils
+- base64
+- bisect
+- bz2
+- collections.__init__
+- concurrent.__init__
+- concurrent.futures.__init__
+- concurrent.futures._base
+- contextlib
+- contextvars
+- copy
+- copyreg
+- coverage_runner
+- ctypes.__init__
+- ctypes._endian
+- dataclasses
+- difflib
+- enum
+- fnmatch
+- functools
+- gettext
+- heapq
+- importlib.__init__
+- importlib._abc
+- inspect
+- json.__init__
+- json.decoder
+- json.encoder
+- json.scanner
+- linecache
+- llm.__init__
+- llm.wrappers
+- locale
+- logging.__init__
+- lzma
+- model.__init__
+- model.loading
+- pkgutil
+- platform
+- pprint
+- random
+- re.__init__
+- re._compiler
+- re._parser
+- reprlib
+- selectors
+- shutil
+- signal
+- socket
+- ssl
+- string
+- subprocess
+- system.__init__
+- system.capabilities
+- system.cli_capabilities
+- tempfile
+- test_capabilities
+- test_llm_wrappers
+- test_model_loading
+- textwrap
+- threading
+- tokenize
+- traceback
+- types
+- typing
+- unittest.__init__
+- unittest.async_case
+- unittest.case
+- unittest.loader
+- unittest.main
+- unittest.mock
+- unittest.result
+- unittest.runner
+- unittest.signals
+- unittest.suite
+- unittest.util
+- warnings
+- weakref

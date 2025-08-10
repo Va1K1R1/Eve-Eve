@@ -1,0 +1,175 @@
+    1: import io
+    1: import json
+    1: import os
+    1: import sys
+    1: import types
+    1: import unittest
+    1: import ctypes
+    1: from unittest import mock
+       
+       # Ensure src is importable when running tests from repo root
+    1: THIS_DIR = os.path.dirname(__file__)
+    1: SRC_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", "src"))
+    1: if SRC_DIR not in sys.path:
+>>>>>>     sys.path.insert(0, SRC_DIR)
+       
+    1: import system.capabilities as caps  # noqa: E402
+    1: from system.cli_capabilities import main as cli_main  # noqa: E402
+       
+       
+    1: def _cp(returncode=0, stdout="", stderr=""):
+    8:     return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+       
+       
+    2: class CapabilitiesTests(unittest.TestCase):
+    1:     def test_run_powershell_capture_success(self):
+               # Simulate successful PowerShell command
+    2:         with mock.patch("subprocess.run", return_value=_cp(0, '{"Name":"CPU"}', "")):
+    1:             cp = caps._run_powershell_capture("Get-CimInstance Win32_Processor")
+    1:         self.assertEqual(cp.returncode, 0)
+    1:         self.assertTrue(cp.stdout)
+       
+       
+    1:     def test_get_total_ram_bytes_sysconf_failure(self):
+    2:         with mock.patch.object(caps.ctypes, "windll", side_effect=AttributeError("no windll")), \
+    2:              mock.patch.object(caps.os, "sysconf_names", new={}, create=True), \
+    2:              mock.patch.object(caps.os, "sysconf", side_effect=OSError("no sysconf"), create=True):
+    1:             val = caps._get_total_ram_bytes()
+    1:         self.assertEqual(val, 0)
+       
+    1:     def test_nvidia_smi_parsing(self):
+               """nvidia-smi CSV nounits path should parse correctly and round MiB→GiB."""
+    1:         fake_out = "NVIDIA GeForce RTX 4090,24576,555.55,12.2\n"
+    2:         with mock.patch("subprocess.run", return_value=_cp(0, fake_out, "")):
+    1:             info = caps._detect_gpu_with_nvidia_smi()
+    1:         self.assertIsNotNone(info)
+    1:         self.assertEqual(info["gpu"], "NVIDIA GeForce RTX 4090")
+    1:         self.assertEqual(info["vram_gb"], 24)  # 24576 MiB ≈ 24 GiB
+    1:         self.assertEqual(info["driver"], "555.55")
+    1:         self.assertEqual(info["cuda"], "12.2")
+       
+    1:     def test_wmi_gpu_fallback_parsing(self):
+               """WMI fallback JSON should parse correctly; CUDA unknown (None)."""
+    1:         obj = {
+    1:             "Name": "NVIDIA GeForce RTX 4090",
+    1:             "AdapterRAM": 25769803776,  # 24 GiB
+    1:             "DriverVersion": "555.55",
+               }
+    2:         with mock.patch.object(caps, "_run_powershell_capture", return_value=_cp(0, json.dumps(obj), "")):
+    1:             info = caps._detect_gpu_with_wmi()
+    1:         self.assertIsNotNone(info)
+    1:         self.assertEqual(info["gpu"], "NVIDIA GeForce RTX 4090")
+    1:         self.assertEqual(info["vram_gb"], 24)
+    1:         self.assertEqual(info["driver"], "555.55")
+    1:         self.assertIsNone(info["cuda"])  # WMI path cannot infer CUDA
+       
+    1:     def test_detect_gpu_both_fail(self):
+    2:         with mock.patch.object(caps, "_detect_gpu_with_nvidia_smi", return_value=None), \
+    2:              mock.patch.object(caps, "_detect_gpu_with_wmi", return_value=None):
+    1:             info = caps.detect_gpu()
+    1:         self.assertIsInstance(info, dict)
+    1:         self.assertIn("gpu", info)
+    1:         self.assertIn("vram_gb", info)
+    1:         self.assertIn("driver", info)
+    1:         self.assertIn("cuda", info)
+    1:         self.assertIsNone(info["gpu"])  # all None when undetected
+       
+    1:     def test_ram_rounding_and_zero(self):
+    1:         giB = 1024 ** 3
+    2:         with mock.patch.object(caps, "_get_total_ram_bytes", return_value=int(15.4 * giB)):
+    1:             self.assertEqual(caps.get_total_ram_gb(), 15)
+    2:         with mock.patch.object(caps, "_get_total_ram_bytes", return_value=int(15.6 * giB)):
+    1:             self.assertEqual(caps.get_total_ram_gb(), 16)
+    2:         with mock.patch.object(caps, "_get_total_ram_bytes", return_value=0):
+    1:             self.assertEqual(caps.get_total_ram_gb(), 0)
+       
+    1:     def test_cpu_name_paths(self):
+    2:         with mock.patch.object(caps, "_get_cpu_name_wmi", return_value="AMD Ryzen 9 7950X3D"):
+    1:             self.assertEqual(caps.get_cpu_name(), "AMD Ryzen 9 7950X3D")
+    2:         with mock.patch.object(caps, "_get_cpu_name_wmi", return_value=None), \
+    2:              mock.patch("platform.processor", return_value="SomeCPU"):
+    1:             self.assertEqual(caps.get_cpu_name(), "SomeCPU")
+       
+    1:     def test_get_cores(self):
+    2:         with mock.patch("os.cpu_count", return_value=16):
+    1:             self.assertEqual(caps.get_cores(), 16)
+    2:         with mock.patch("os.cpu_count", return_value=None):
+    1:             self.assertEqual(caps.get_cores(), 1)
+       
+    1:     def test_get_capabilities_aggregation(self):
+    1:         gpu = {"gpu": "RTX 4090", "vram_gb": 24, "driver": "555.55", "cuda": "12.2"}
+    2:         with mock.patch.object(caps, "get_cpu_name", return_value="CPU"), \
+    2:              mock.patch.object(caps, "get_cores", return_value=16), \
+    2:              mock.patch.object(caps, "get_total_ram_gb", return_value=32), \
+    2:              mock.patch.object(caps, "detect_gpu", return_value=gpu):
+    1:             out = caps.get_capabilities()
+    1:         self.assertEqual(out["cpu"], "CPU")
+    1:         self.assertEqual(out["cores"], 16)
+    1:         self.assertEqual(out["gpu"], "RTX 4090")
+    1:         self.assertEqual(out["vram_gb"], 24)
+    1:         self.assertEqual(out["driver"], "555.55")
+    1:         self.assertEqual(out["cuda"], "12.2")
+    1:         self.assertEqual(out["ram_gb"], 32)
+       
+    1:     def test_cli_outputs_json_with_required_keys(self):
+    1:         buf = io.StringIO()
+    3:         with mock.patch("system.cli_capabilities.get_capabilities", return_value={
+    1:             "cpu": "CPU",
+    1:             "cores": 16,
+    1:             "gpu": "RTX 4090",
+    1:             "vram_gb": 24,
+    1:             "driver": "555.55",
+    1:             "cuda": "12.2",
+    1:             "ram_gb": 32,
+    2:         }), mock.patch("sys.stdout", new=buf):
+    1:             rc = cli_main(["--pretty"])
+    1:         self.assertEqual(rc, 0)
+    1:         data = json.loads(buf.getvalue())
+    8:         for k in ("cpu", "cores", "gpu", "vram_gb", "driver", "cuda", "ram_gb"):
+    7:             self.assertIn(k, data)
+       
+    1:     def test_run_powershell_capture_exception_path(self):
+    2:         with mock.patch("subprocess.run", side_effect=RuntimeError("ps not available")):
+    1:             cp = caps._run_powershell_capture("Get-Whatever")
+    1:         self.assertEqual(cp.returncode, 1)
+    1:         self.assertEqual(cp.stdout, "")
+       
+    1:     def test_total_ram_bytes_ctypes_path(self):
+               # Mock the successful ctypes/GlobalMemoryStatusEx path
+    2:         class K32:
+    1:             def GlobalMemoryStatusEx(self, pstat):
+                       # Set ullTotalPhys to 16 GiB
+    2:                 stat = pstat._obj  # extract underlying object from byref()
+    2:                 stat.ullTotalPhys = 16 * (1024 ** 3)
+    2:                 return 1
+    1:         fake_windll = types.SimpleNamespace(kernel32=K32())
+    2:         with mock.patch.object(ctypes, "windll", new=fake_windll):
+    1:             val = caps._get_total_ram_bytes()
+    1:             gb = caps.get_total_ram_gb()
+    1:         self.assertGreater(val, 0)
+    1:         self.assertEqual(gb, 16)
+       
+    1:     def test_nvidia_smi_error_and_malformed(self):
+               # Returncode non-zero -> None
+    2:         with mock.patch("subprocess.run", return_value=_cp(1, "", "err")):
+    1:             self.assertIsNone(caps._detect_gpu_with_nvidia_smi())
+               # Empty stdout -> None
+    2:         with mock.patch("subprocess.run", return_value=_cp(0, "\n", "")):
+    1:             self.assertIsNone(caps._detect_gpu_with_nvidia_smi())
+               # Malformed parts -> None
+    2:         with mock.patch("subprocess.run", return_value=_cp(0, "OnlyTwo,123\n", "")):
+    1:             self.assertIsNone(caps._detect_gpu_with_nvidia_smi())
+       
+    1:     def test_cpu_wmi_json_array_and_string_variants(self):
+               # Array variant
+    1:         arr_json = json.dumps([{"Name": "CPU WMI"}])
+    2:         with mock.patch.object(caps, "_run_powershell_capture", return_value=_cp(0, arr_json, "")):
+    1:             self.assertEqual(caps._get_cpu_name_wmi(), "CPU WMI")
+               # String variant
+    1:         str_json = json.dumps("CPU Simple")
+    2:         with mock.patch.object(caps, "_run_powershell_capture", return_value=_cp(0, str_json, "")):
+    1:             self.assertEqual(caps._get_cpu_name_wmi(), "CPU Simple")
+       
+       
+    1: if __name__ == "__main__":
+>>>>>>     unittest.main(verbosity=2)

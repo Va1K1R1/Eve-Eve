@@ -1,0 +1,84 @@
+    1: import functools
+    1: import inspect
+    1: import reprlib
+    1: import sys
+    1: import traceback
+       
+    1: from . import constants
+       
+       
+    1: def _get_function_source(func):
+   40:     func = inspect.unwrap(func)
+   40:     if inspect.isfunction(func):
+   40:         code = func.__code__
+   40:         return (code.co_filename, code.co_firstlineno)
+>>>>>>     if isinstance(func, functools.partial):
+>>>>>>         return _get_function_source(func.func)
+>>>>>>     if isinstance(func, functools.partialmethod):
+>>>>>>         return _get_function_source(func.func)
+>>>>>>     return None
+       
+       
+    1: def _format_callback_source(func, args, *, debug=False):
+   40:     func_repr = _format_callback(func, args, None, debug=debug)
+   40:     source = _get_function_source(func)
+   40:     if source:
+   40:         func_repr += f' at {source[0]}:{source[1]}'
+   40:     return func_repr
+       
+       
+    1: def _format_args_and_kwargs(args, kwargs, *, debug=False):
+           """Format function arguments and keyword arguments.
+       
+           Special case for a single parameter: ('hello',) is formatted as ('hello').
+       
+           Note that this function only returns argument details when
+           debug=True is specified, as arguments may contain sensitive
+           information.
+           """
+   40:     if not debug:
+>>>>>>         return '()'
+       
+           # use reprlib to limit the length of the output
+   40:     items = []
+   40:     if args:
+  160:         items.extend(reprlib.repr(arg) for arg in args)
+   40:     if kwargs:
+>>>>>>         items.extend(f'{k}={reprlib.repr(v)}' for k, v in kwargs.items())
+   40:     return '({})'.format(', '.join(items))
+       
+       
+    1: def _format_callback(func, args, kwargs, *, debug=False, suffix=''):
+   40:     if isinstance(func, functools.partial):
+>>>>>>         suffix = _format_args_and_kwargs(args, kwargs, debug=debug) + suffix
+>>>>>>         return _format_callback(func.func, func.args, func.keywords,
+>>>>>>                                 debug=debug, suffix=suffix)
+       
+   40:     if hasattr(func, '__qualname__') and func.__qualname__:
+   40:         func_repr = func.__qualname__
+>>>>>>     elif hasattr(func, '__name__') and func.__name__:
+>>>>>>         func_repr = func.__name__
+           else:
+>>>>>>         func_repr = repr(func)
+       
+   40:     func_repr += _format_args_and_kwargs(args, kwargs, debug=debug)
+   40:     if suffix:
+>>>>>>         func_repr += suffix
+   40:     return func_repr
+       
+       
+    1: def extract_stack(f=None, limit=None):
+           """Replacement for traceback.extract_stack() that only does the
+           necessary work for asyncio debug mode.
+           """
+  166:     if f is None:
+>>>>>>         f = sys._getframe().f_back
+  166:     if limit is None:
+               # Limit the amount of work to a reasonable amount, as extract_stack()
+               # can be called for each coroutine and future in debug mode.
+  166:         limit = constants.DEBUG_STACK_DEPTH
+  332:     stack = traceback.StackSummary.extract(traceback.walk_stack(f),
+  166:                                            limit=limit,
+  166:                                            lookup_lines=False)
+  166:     stack.reverse()
+  166:     return stack

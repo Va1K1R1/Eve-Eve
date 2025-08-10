@@ -1,0 +1,216 @@
+    1: __all__ = ('Runner', 'run')
+       
+    1: import contextvars
+    1: import enum
+    1: import functools
+    1: import threading
+    1: import signal
+    1: from . import coroutines
+    1: from . import events
+    1: from . import exceptions
+    1: from . import tasks
+    1: from . import constants
+       
+    2: class _State(enum.Enum):
+    1:     CREATED = "created"
+    1:     INITIALIZED = "initialized"
+    1:     CLOSED = "closed"
+       
+       
+    2: class Runner:
+    1:     """A context manager that controls event loop life cycle.
+       
+           The context manager always creates a new event loop,
+           allows to run async functions inside it,
+           and properly finalizes the loop at the context manager exit.
+       
+           If debug is True, the event loop will be run in debug mode.
+           If loop_factory is passed, it is used for new event loop creation.
+       
+           asyncio.run(main(), debug=True)
+       
+           is a shortcut for
+       
+           with asyncio.Runner(debug=True) as runner:
+               runner.run(main())
+       
+           The run() method can be called multiple times within the runner's context.
+       
+           This can be useful for interactive console (e.g. IPython),
+           unittest runners, console tools, -- everywhere when async code
+           is called from existing sync framework and where the preferred single
+           asyncio.run() call doesn't work.
+       
+           """
+       
+           # Note: the class is final, it is not intended for inheritance.
+       
+    1:     def __init__(self, *, debug=None, loop_factory=None):
+    3:         self._state = _State.CREATED
+    3:         self._debug = debug
+    3:         self._loop_factory = loop_factory
+    3:         self._loop = None
+    3:         self._context = None
+    3:         self._interrupt_count = 0
+    3:         self._set_event_loop = False
+       
+    1:     def __enter__(self):
+>>>>>>         self._lazy_init()
+>>>>>>         return self
+       
+    1:     def __exit__(self, exc_type, exc_val, exc_tb):
+>>>>>>         self.close()
+       
+    1:     def close(self):
+               """Shutdown and close event loop."""
+    6:         if self._state is not _State.INITIALIZED:
+    3:             return
+    3:         try:
+    3:             loop = self._loop
+    3:             _cancel_all_tasks(loop)
+    3:             loop.run_until_complete(loop.shutdown_asyncgens())
+    6:             loop.run_until_complete(
+    3:                 loop.shutdown_default_executor(constants.THREAD_JOIN_TIMEOUT))
+               finally:
+    3:             if self._set_event_loop:
+    3:                 events.set_event_loop(None)
+    3:             loop.close()
+    3:             self._loop = None
+    3:             self._state = _State.CLOSED
+       
+    1:     def get_loop(self):
+               """Return embedded event loop."""
+    3:         self._lazy_init()
+    3:         return self._loop
+       
+    1:     def run(self, coro, *, context=None):
+               """Run a coroutine inside the embedded event loop."""
+    9:         if not coroutines.iscoroutine(coro):
+>>>>>>             raise ValueError("a coroutine was expected, got {!r}".format(coro))
+       
+    9:         if events._get_running_loop() is not None:
+                   # fail fast with short traceback
+>>>>>>             raise RuntimeError(
+>>>>>>                 "Runner.run() cannot be called from a running event loop")
+       
+    9:         self._lazy_init()
+       
+    9:         if context is None:
+>>>>>>             context = self._context
+    9:         task = self._loop.create_task(coro, context=context)
+       
+    9:         if (threading.current_thread() is threading.main_thread()
+    9:             and signal.getsignal(signal.SIGINT) is signal.default_int_handler
+               ):
+    9:             sigint_handler = functools.partial(self._on_sigint, main_task=task)
+    9:             try:
+    9:                 signal.signal(signal.SIGINT, sigint_handler)
+>>>>>>             except ValueError:
+                       # `signal.signal` may throw if `threading.main_thread` does
+                       # not support signals (e.g. embedded interpreter with signals
+                       # not registered - see gh-91880)
+>>>>>>                 sigint_handler = None
+               else:
+>>>>>>             sigint_handler = None
+       
+    9:         self._interrupt_count = 0
+    9:         try:
+    9:             return self._loop.run_until_complete(task)
+>>>>>>         except exceptions.CancelledError:
+>>>>>>             if self._interrupt_count > 0:
+>>>>>>                 uncancel = getattr(task, "uncancel", None)
+>>>>>>                 if uncancel is not None and uncancel() == 0:
+>>>>>>                     raise KeyboardInterrupt()
+>>>>>>             raise  # CancelledError
+               finally:
+    9:             if (sigint_handler is not None
+    9:                 and signal.getsignal(signal.SIGINT) is sigint_handler
+                   ):
+    9:                 signal.signal(signal.SIGINT, signal.default_int_handler)
+       
+    1:     def _lazy_init(self):
+   12:         if self._state is _State.CLOSED:
+>>>>>>             raise RuntimeError("Runner is closed")
+   12:         if self._state is _State.INITIALIZED:
+    9:             return
+    3:         if self._loop_factory is None:
+    3:             self._loop = events.new_event_loop()
+    3:             if not self._set_event_loop:
+                       # Call set_event_loop only once to avoid calling
+                       # attach_loop multiple times on child watchers
+    3:                 events.set_event_loop(self._loop)
+    3:                 self._set_event_loop = True
+               else:
+>>>>>>             self._loop = self._loop_factory()
+    3:         if self._debug is not None:
+    3:             self._loop.set_debug(self._debug)
+    3:         self._context = contextvars.copy_context()
+    3:         self._state = _State.INITIALIZED
+       
+    1:     def _on_sigint(self, signum, frame, main_task):
+>>>>>>         self._interrupt_count += 1
+>>>>>>         if self._interrupt_count == 1 and not main_task.done():
+>>>>>>             main_task.cancel()
+                   # wakeup loop if it is blocked by select() with long timeout
+>>>>>>             self._loop.call_soon_threadsafe(lambda: None)
+>>>>>>             return
+>>>>>>         raise KeyboardInterrupt()
+       
+       
+    1: def run(main, *, debug=None, loop_factory=None):
+           """Execute the coroutine and return the result.
+       
+           This function runs the passed coroutine, taking care of
+           managing the asyncio event loop, finalizing asynchronous
+           generators and closing the default executor.
+       
+           This function cannot be called when another asyncio event loop is
+           running in the same thread.
+       
+           If debug is True, the event loop will be run in debug mode.
+           If loop_factory is passed, it is used for new event loop creation.
+       
+           This function always creates a new event loop and closes it at the end.
+           It should be used as a main entry point for asyncio programs, and should
+           ideally only be called once.
+       
+           The executor is given a timeout duration of 5 minutes to shutdown.
+           If the executor hasn't finished within that duration, a warning is
+           emitted and the executor is closed.
+       
+           Example:
+       
+               async def main():
+                   await asyncio.sleep(1)
+                   print('hello')
+       
+               asyncio.run(main())
+           """
+>>>>>>     if events._get_running_loop() is not None:
+               # fail fast with short traceback
+>>>>>>         raise RuntimeError(
+>>>>>>             "asyncio.run() cannot be called from a running event loop")
+       
+>>>>>>     with Runner(debug=debug, loop_factory=loop_factory) as runner:
+>>>>>>         return runner.run(main)
+       
+       
+    1: def _cancel_all_tasks(loop):
+    3:     to_cancel = tasks.all_tasks(loop)
+    3:     if not to_cancel:
+    3:         return
+       
+>>>>>>     for task in to_cancel:
+>>>>>>         task.cancel()
+       
+>>>>>>     loop.run_until_complete(tasks.gather(*to_cancel, return_exceptions=True))
+       
+>>>>>>     for task in to_cancel:
+>>>>>>         if task.cancelled():
+>>>>>>             continue
+>>>>>>         if task.exception() is not None:
+>>>>>>             loop.call_exception_handler({
+>>>>>>                 'message': 'unhandled exception during asyncio.run() shutdown',
+>>>>>>                 'exception': task.exception(),
+>>>>>>                 'task': task,
+                   })

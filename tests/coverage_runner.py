@@ -1,0 +1,34 @@
+import os
+import sys
+import unittest
+import trace
+
+# Ensure src is importable
+THIS_DIR = os.path.dirname(__file__)
+ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
+SRC_DIR = os.path.join(ROOT, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
+
+def run_suite():
+    suite = unittest.defaultTestLoader.discover(start_dir=os.path.join(ROOT, "tests"), pattern="test_*.py")
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    # Propagate non-zero exit on failure
+    if not result.wasSuccessful():
+        return 1
+    return 0
+
+
+def main() -> int:
+    tracer = trace.Trace(count=True, trace=False)
+    rc = tracer.runfunc(run_suite)
+    results = tracer.results()
+    # Write .cover files to project root
+    results.write_results(show_missing=True, coverdir=ROOT)
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

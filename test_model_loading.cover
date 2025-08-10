@@ -1,0 +1,72 @@
+    1: import os
+    1: import sys
+    1: import unittest
+       
+       # Ensure src is importable when running tests from repo root
+    1: THIS_DIR = os.path.dirname(__file__)
+    1: SRC_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", "src"))
+    1: if SRC_DIR not in sys.path:
+>>>>>>     sys.path.insert(0, SRC_DIR)
+       
+    1: from model.loading import VRAMBudget, DummyModelAdapter  # noqa: E402
+       
+       
+    2: class VRAMBudgetTests(unittest.TestCase):
+    1:     def test_effective_budget_and_validation(self):
+    1:         b = VRAMBudget(10.0, 0.1)
+    1:         self.assertAlmostEqual(b.effective_gb(), 9.0)
+    2:         with self.assertRaises(ValueError):
+    1:             VRAMBudget(0.0, 0.1).effective_gb()
+    2:         with self.assertRaises(ValueError):
+    1:             VRAMBudget(10.0, -0.1).effective_gb()
+    2:         with self.assertRaises(ValueError):
+    1:             VRAMBudget(10.0, 1.0).effective_gb()
+       
+       
+    2: class DummyAdapterTests(unittest.TestCase):
+    1:     def test_suggest_batch_and_can_fit(self):
+    1:         adapter = DummyModelAdapter(model_overhead_gb=1.0, per_sample_gb=0.5)
+               # cap=8, margin=0.1 -> eff=7.2; usable=6.2; batch=floor(6.2/0.5)=12
+    1:         self.assertEqual(adapter.suggest_batch_size(8.0, safety_margin=0.1), 12)
+    1:         self.assertTrue(adapter.can_fit_batch(12, 8.0, safety_margin=0.1))
+    1:         self.assertFalse(adapter.can_fit_batch(13, 8.0, safety_margin=0.1))
+       
+    1:     def test_load_and_unload(self):
+    1:         adapter = DummyModelAdapter(model_overhead_gb=1.0, per_sample_gb=0.5, name="A")
+    1:         info = adapter.load(model_path="/path/model", vram_cap_gb=8.0, safety_margin=0.1)
+    1:         self.assertTrue(adapter.loaded)
+    1:         self.assertIn("batch_size", info)
+    1:         adapter.unload()
+    1:         self.assertFalse(adapter.loaded)
+       
+    1:     def test_edge_cases_caps_and_overhead(self):
+    1:         adapter = DummyModelAdapter(model_overhead_gb=1.0, per_sample_gb=0.6)
+               # Non-positive cap -> suggest should raise via VRAMBudget
+    2:         with self.assertRaises(ValueError):
+    1:             adapter.suggest_batch_size(0.0)
+               # Overhead does not fit -> load should raise MemoryError when chosen==0
+               # eff = 0.945 < overhead=1.0
+    2:         with self.assertRaises(MemoryError):
+    1:             adapter.load(model_path="m", vram_cap_gb=1.05, safety_margin=0.10)
+               # Overhead fits but per-sample doesn't -> allow zero-batch init
+    1:         adapter_ok = DummyModelAdapter(model_overhead_gb=0.5, per_sample_gb=0.6)
+               # eff=0.9; usable=0.4 < per -> suggest=0 -> load with chosen None allowed
+    1:         info = adapter_ok.load(model_path="m2", vram_cap_gb=1.0, safety_margin=0.10)
+    1:         self.assertEqual(info["batch_size"], 0)
+    1:         self.assertTrue(adapter_ok.loaded)
+    1:         adapter_ok.unload()
+    1:         self.assertFalse(adapter_ok.loaded)
+       
+    1:     def test_invalid_inputs(self):
+    1:         adapter = DummyModelAdapter(model_overhead_gb=0.0, per_sample_gb=0.5)
+    2:         with self.assertRaises(ValueError):
+    1:             adapter.load(model_path="", vram_cap_gb=2.0)
+    2:         with self.assertRaises(ValueError):
+    1:             adapter.load(model_path="m", vram_cap_gb=2.0, batch_size=-1)
+               # Invalid safety margin
+    2:         with self.assertRaises(ValueError):
+    1:             adapter.suggest_batch_size(2.0, safety_margin=1.0)
+       
+       
+    1: if __name__ == "__main__":
+>>>>>>     unittest.main(verbosity=2)

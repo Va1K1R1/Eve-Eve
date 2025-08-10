@@ -1,0 +1,23 @@
+    1: import json
+    1: import sys
+    1: from typing import List, Optional
+       
+    1: from .capabilities import get_capabilities
+       
+       
+    1: def main(argv: Optional[List[str]] = None) -> int:
+    1:     args = argv if argv is not None else sys.argv[1:]
+    1:     pretty = False
+    2:     for a in args:
+    1:         if a in ("-p", "--pretty"):
+    1:             pretty = True
+    1:     caps = get_capabilities()
+    1:     if pretty:
+    1:         print(json.dumps(caps, indent=2, sort_keys=True))
+           else:
+>>>>>>         print(json.dumps(caps, sort_keys=True))
+    1:     return 0
+       
+       
+    1: if __name__ == "__main__":
+>>>>>>     raise SystemExit(main())

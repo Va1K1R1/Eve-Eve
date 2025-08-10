@@ -1,0 +1,12 @@
+    1: """
+       Model package: interface-only components for VRAM-aware model loading (Kanban T-003).
+       
+       This package is stdlib-only and contains no heavy dependencies. It exposes a
+       simple adapter interface and a dummy implementation suitable for unit tests
+       and future extension.
+       """
+    1: from __future__ import annotations
+       
+    1: __all__ = [
+    1:     "loading",
+       ]

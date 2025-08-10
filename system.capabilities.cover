@@ -1,0 +1,291 @@
+    1: """
+       Hardware/Environment capability probe (Windows-first, zero external dependencies).
+       
+       Exposes pure functions that collect local system information without
+       any network activity. Designed to be robust on systems without NVIDIA GPU or
+       without vendor tools, using PowerShell/WMI fallbacks where possible.
+       
+       Returned field semantics (all optional where unavailable):
+       - cpu: str | None         Human-readable CPU name
+       - cores: int              Logical core count (>=1)
+       - gpu: str | None         Human-readable GPU name
+       - vram_gb: int | None     Total VRAM in GiB (rounded to nearest int)
+       - driver: str | None      GPU driver version
+       - cuda: str | None        CUDA version (if NVIDIA stack available)
+       - ram_gb: int             Total system RAM in GiB (rounded to nearest int)
+       
+       Privacy-by-design: no network calls, only local OS queries.
+       """
+    1: from __future__ import annotations
+       
+    1: import json
+    1: import logging
+    1: import os
+    1: import subprocess
+    1: import sys
+    1: from typing import Any, Dict, Optional
+    1: import ctypes
+       
+    1: logger = logging.getLogger(__name__)
+       
+       
+       # -----------------------------
+       # RAM helpers (ctypes on Win32)
+       # -----------------------------
+    2: class MEMORYSTATUSEX(ctypes.Structure):
+    1:     _fields_ = [
+    1:         ("dwLength", ctypes.c_ulong),
+    1:         ("dwMemoryLoad", ctypes.c_ulong),
+    1:         ("ullTotalPhys", ctypes.c_ulonglong),
+    1:         ("ullAvailPhys", ctypes.c_ulonglong),
+    1:         ("ullTotalPageFile", ctypes.c_ulonglong),
+    1:         ("ullAvailPageFile", ctypes.c_ulonglong),
+    1:         ("ullTotalVirtual", ctypes.c_ulonglong),
+    1:         ("ullAvailVirtual", ctypes.c_ulonglong),
+    1:         ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+           ]
+       
+       
+    1: def _get_total_ram_bytes() -> int:
+           """Return total physical memory in bytes using GlobalMemoryStatusEx.
+           Cross-platform fallback uses os.sysconf when ctypes call fails.
+           """
+    3:     try:
+    3:         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    3:         stat = MEMORYSTATUSEX()
+    3:         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+    3:         if not kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+>>>>>>             raise OSError("GlobalMemoryStatusEx failed")
+    3:         return int(stat.ullTotalPhys)
+>>>>>>     except Exception as e:
+>>>>>>         logger.debug("ctypes GlobalMemoryStatusEx failed: %s", e)
+               # Portable fallback (may not exist on Windows, but safe guard for tests/ports)
+>>>>>>         try:
+>>>>>>             if hasattr(os, "sysconf") and "SC_PAGE_SIZE" in os.sysconf_names:  # type: ignore[attr-defined]
+>>>>>>                 page_size = os.sysconf("SC_PAGE_SIZE")  # type: ignore
+>>>>>>                 phys_pages = os.sysconf("SC_PHYS_PAGES")  # type: ignore
+>>>>>>                 return int(page_size) * int(phys_pages)
+>>>>>>         except Exception as e2:
+>>>>>>             logger.debug("sysconf fallback failed: %s", e2)
+               # Last resort unknown
+>>>>>>         return 0
+       
+       
+    1: def get_total_ram_gb() -> int:
+    4:     total_bytes = _get_total_ram_bytes()
+    4:     if total_bytes <= 0:
+               # ensure non-negative integer result
+    1:         return 0
+    3:     gb = total_bytes / (1024 ** 3)
+    3:     return int(round(gb))
+       
+       
+       # -----------------------------
+       # CPU helpers (PowerShell WMI)
+       # -----------------------------
+       
+    1: def _run_powershell_capture(cmd: str) -> subprocess.CompletedProcess:
+           """Run a PowerShell command without profile; capture output.
+           Returns a CompletedProcess regardless of exit status.
+           """
+    2:     try:
+    4:         return subprocess.run(
+    2:             ["powershell", "-NoProfile", "-Command", cmd],
+    2:             capture_output=True,
+    2:             text=True,
+    2:             timeout=5,
+    2:             check=False,
+               )
+    1:     except Exception as e:
+    1:         logger.debug("PowerShell execution failed: %s", e)
+               # Synthesize a failed CompletedProcess-like object
+    1:         cp = subprocess.CompletedProcess(args=["powershell"], returncode=1)
+    1:         cp.stdout = ""  # type: ignore[attr-defined]
+    1:         cp.stderr = str(e)  # type: ignore[attr-defined]
+    1:         return cp
+       
+       
+    1: def _get_cpu_name_wmi() -> Optional[str]:
+           # Use ConvertTo-Json for structured parse
+    2:     cmd = (
+    2:         "Get-CimInstance Win32_Processor | "
+               "Select-Object -First 1 Name | ConvertTo-Json -Depth 2"
+           )
+    2:     cp = _run_powershell_capture(cmd)
+    2:     if cp.returncode != 0 or not cp.stdout.strip():
+>>>>>>         return None
+    2:     try:
+    2:         data = json.loads(cp.stdout)
+    2:         if isinstance(data, dict):
+>>>>>>             name = data.get("Name")
+>>>>>>             return str(name) if name else None
+    2:         elif isinstance(data, list) and data:
+                   # Some PS versions may output array
+    1:             first = data[0]
+    1:             if isinstance(first, dict):
+    1:                 name = first.get("Name")
+    1:                 return str(name) if name else None
+    1:         elif isinstance(data, str):
+    1:             return data.strip()
+>>>>>>     except Exception as e:
+>>>>>>         logger.debug("CPU WMI JSON parse failed: %s", e)
+>>>>>>     return None
+       
+       
+    1: def get_cpu_name() -> Optional[str]:
+    2:     name = _get_cpu_name_wmi()
+    2:     if name:
+    1:         return name
+           # Fallbacks
+    1:     try:
+    1:         import platform
+       
+    1:         name = platform.processor()
+    1:         if name:
+    1:             return name
+>>>>>>     except Exception:
+>>>>>>         pass
+>>>>>>     return None
+       
+       
+    1: def get_cores() -> int:
+    2:     c = os.cpu_count() or 1
+    2:     return int(c)
+       
+       
+       # -----------------------------
+       # GPU helpers (nvidia-smi or WMI)
+       # -----------------------------
+       
+    1: def _detect_gpu_with_nvidia_smi() -> Optional[Dict[str, Any]]:
+           """Try NVIDIA stack via nvidia-smi. Returns dict or None if unavailable.
+           Output CSV: name,memory.total,driver_version,cuda_version
+           memory.total is in MiB (nounits).
+           """
+    4:     try:
+    8:         cp = subprocess.run(
+    4:             [
+                       "nvidia-smi",
+                       "--query-gpu=name,memory.total,driver_version,cuda_version",
+                       "--format=csv,noheader,nounits",
+                   ],
+    4:             capture_output=True,
+    4:             text=True,
+    4:             timeout=5,
+    4:             check=False,
+               )
+>>>>>>     except Exception as e:
+>>>>>>         logger.debug("nvidia-smi execution failed: %s", e)
+>>>>>>         return None
+       
+    4:     if cp.returncode != 0:
+    1:         return None
+    3:     raw = (cp.stdout or "")
+    6:     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    3:     if not lines:
+    1:         return None
+    2:     line = lines[0]
+    8:     parts = [p.strip() for p in line.split(",")]
+    2:     if len(parts) < 4:
+    1:         return None
+    1:     name, mem_mib_str, driver, cuda = parts[:4]
+    1:     try:
+    1:         mem_mib = int(mem_mib_str)
+    1:         vram_gb = int(round(mem_mib / 1024))
+>>>>>>     except Exception:
+>>>>>>         vram_gb = None
+    1:     result = {
+    1:         "gpu": name or None,
+    1:         "vram_gb": vram_gb,
+    1:         "driver": driver or None,
+    1:         "cuda": cuda or None,
+           }
+    1:     return result
+       
+       
+    1: def _detect_gpu_with_wmi() -> Optional[Dict[str, Any]]:
+           # Query first GPU via WMI
+    1:     cmd = (
+    1:         "Get-CimInstance Win32_VideoController | "
+               "Select-Object -First 1 Name, AdapterRAM, DriverVersion | "
+               "ConvertTo-Json -Depth 3"
+           )
+    1:     cp = _run_powershell_capture(cmd)
+    1:     if cp.returncode != 0 or not cp.stdout.strip():
+>>>>>>         return None
+    1:     try:
+    1:         data = json.loads(cp.stdout)
+    1:         if isinstance(data, list) and data:
+>>>>>>             data = data[0]
+    1:         if not isinstance(data, dict):
+>>>>>>             return None
+    1:         name = data.get("Name")
+    1:         adapter_ram = data.get("AdapterRAM")
+    1:         driver = data.get("DriverVersion")
+    1:         vram_gb = None
+    1:         try:
+    1:             if adapter_ram is not None:
+    1:                 vram_gb = int(round(int(adapter_ram) / (1024 ** 3)))
+>>>>>>         except Exception:
+>>>>>>             vram_gb = None
+    1:         return {
+    1:             "gpu": str(name) if name else None,
+    1:             "vram_gb": vram_gb,
+    1:             "driver": str(driver) if driver else None,
+    1:             "cuda": None,  # WMI doesn't expose CUDA; unknown
+               }
+>>>>>>     except Exception as e:
+>>>>>>         logger.debug("GPU WMI JSON parse failed: %s", e)
+>>>>>>         return None
+       
+       
+    1: def detect_gpu() -> Dict[str, Any]:
+           """Detect GPU info using NVIDIA path first, then WMI.
+           Always returns a dict with keys: gpu, vram_gb, driver, cuda (values may be None).
+           """
+    1:     info = _detect_gpu_with_nvidia_smi()
+    1:     if not info:
+    1:         info = _detect_gpu_with_wmi()
+    1:     if not info:
+    1:         info = {"gpu": None, "vram_gb": None, "driver": None, "cuda": None}
+           # Ensure keys exist
+    5:     for k in ("gpu", "vram_gb", "driver", "cuda"):
+    4:         info.setdefault(k, None)
+    1:     return info
+       
+       
+       # -----------------------------
+       # Aggregation
+       # -----------------------------
+       
+    1: def get_capabilities() -> Dict[str, Any]:
+           """Aggregate system capabilities into a single dict with defined keys."""
+    1:     cpu_name = get_cpu_name()
+    1:     cores = get_cores()
+    1:     ram_gb = get_total_ram_gb()
+    1:     gpu_info = detect_gpu()
+       
+    1:     caps = {
+    1:         "cpu": cpu_name,
+    1:         "cores": int(cores),
+    1:         "gpu": gpu_info.get("gpu"),
+    1:         "vram_gb": gpu_info.get("vram_gb"),
+    1:         "driver": gpu_info.get("driver"),
+    1:         "cuda": gpu_info.get("cuda"),
+    1:         "ram_gb": int(ram_gb),
+           }
+    1:     return caps
+       
+       
+    1: __all__ = [
+           "get_capabilities",
+           "get_cpu_name",
+           "get_cores",
+           "get_total_ram_gb",
+           "detect_gpu",
+           # internal (for tests)
+           "_detect_gpu_with_nvidia_smi",
+           "_detect_gpu_with_wmi",
+           "_get_total_ram_bytes",
+           "_get_cpu_name_wmi",
+       ]
